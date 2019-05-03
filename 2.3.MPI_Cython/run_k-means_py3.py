@@ -1,8 +1,10 @@
 from k_means_class_py3 import K_means
+from sys import argv
 import numpy as np
 # indir = '/data1/djin1/Scratch/'
-indir = '../'
-infile = indir+'aqua_d3_c6_tvp_pcl.noMissing.20050101-20051231_3445612x42.float32.dat'
+# indir = '../../data/'
+# infile = indir+'5years.00.dat'
+infile = argv[1]
 
 domain_size = [30,360]
 nelem=42
