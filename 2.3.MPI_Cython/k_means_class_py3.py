@@ -1,4 +1,5 @@
 import os.path, os
+from os.path import getsize
 import sys
 import numpy as np
 import k_means_cython as km_mod
@@ -75,9 +76,36 @@ class K_means:
         self.nrec=indata.shape[0]/self.nelem
         data = np.reshape(indata,newshape=[int(self.nrec),int(self.nelem)],order='C').astype(float)
         self.startRec, self.stopRec = km_mod.get_record_spans(self.nrec, self.rank, self.tprocs)
-        self.print("[{:03d}] {}::{}".format(self.rank,self.startRec,self.stopRec))
+        self.print("{}::{}".format(self.startRec,self.stopRec))
         self.totalRec = self.stopRec - self.startRec
         self.print(data.shape)
+        return data
+
+    def _initialize_big_indata(self, fname, dtp=np.float32):
+        """
+        Too much data to just "reshape" willy nilly.
+        Load in each record individually by creating an empty array
+        and shift a file pointer slowly :(
+        """
+        # Get a big array
+        indata = np.empty(shape=(self.totalRec,self.nelem), dtype=dtp)
+        bites = dtp(1).nbytes
+        # The initial offset
+        offset = self.startRec * self.nelem * bites
+        self.Allprint("offset: {} totalRec: {} -bigdata".format(offset, self.totalRec))
+        with open(fname, "rb") as inFile:
+            # Use the simple file pointer solution
+            # Find start of data
+            inFile.seek(offset, 0)
+            # Read in data
+            data = np.fromfile(inFile, dtype=dtp, count=self.totalRec*self.nelem)
+            # Use a view to prevent inflated memory
+            data = data.view()
+            data.shape = (self.totalRec,self.nelem)
+
+            self.Allprint("Chunk size: {} -bigdata".format(indata.shape))
+
+
         return data
 
     def get_initial_ctd(self, indata, ini_ctd_dist_min=0.125):
@@ -134,6 +162,65 @@ class K_means:
                 break
 
         return test
+    
+    def initialize_big_data_ctd(self, fname, ini_ctd_dist_min, dtp=np.float32):
+        """
+        Due to the memory constraints of using such a huge dataset
+        one cannot afford to reshape the data!
+        This function calculates the initial centroids 
+        by reading the data straight from disk as needed.
+        This prevents all the overhead that comes with trying to parse
+        through the loads of data that exist.
+        """
+
+        if not os.path.isfile(fname):
+            self.print("File does not exist:"+fname)
+            sys.exit()
+        
+        # Gather the filesize from disk
+        tbites = getsize(fname)
+        # Detect total number of records!
+        bites = dtp(1).nbytes
+        self.nrec = int(tbites/bites/self.nelem)
+
+        # Pick an initial centroid via guesswork
+        ny,nx=self.domain_size
+        ncount_per_day=nx*ny*0.87   # 0.87: approximated data ratio, available/(available+missing)
+        ntodd=17.   # Unit days: odd number
+
+        idx=int(ncount_per_day*(ntodd+(self.id_+13.)/(self.id_+37.)))
+        ctd=[]
+        with open(fname,'rb') as fd:
+            # Calculate the idx offset
+            offset = idx * self.nelem * bites
+            fd.seek(offset, 0)
+            # Read in a single record as an initial centroid
+            data = np.fromfile(fd, dtype=dtp, count=self.nelem)
+            # data.shape = (1,self.nelem)
+            # ctd.append(indata[idx,:])
+            ctd.append(data)
+
+        # Get that file ready for initialization
+        with open(fname,'rb') as fd:
+            while len(ctd)<self.knum:
+                idx+=idx
+                if idx>self.nrec:
+                    idx-=self.nrec
+                    self.print("idx is over total record")
+
+                # Pull it from disk!
+                offset = idx * self.nelem * bites
+                fd.seek(offset, 0)
+                # tmpctd=indata[int(idx),:]
+                tmpctd = np.fromfile(fd, dtype=dtp, count=self.nelem)
+                # tmpctd.shape = (1,self.nelem)
+                if self._test_dist(ctd,tmpctd,ini_ctd_dist_min):
+                    ctd.append(tmpctd)
+        finalArray = np.asfarray(ctd, dtype=dtp)
+        self.print(finalArray.shape)
+        return finalArray
+
+
 
     def parallel_init_ctd(self, fname, dtp=np.float32, ini_ctd_dist_min=0.125):
         """
@@ -153,47 +240,31 @@ class K_means:
         """
         # self.startRec, self.stopRec = km_mod.get_record_spans(self.nrec, self.rank, self.tprocs)
         if self.rank == 0:
-            # read in binary data on process 0
-            indata = self.read_bin_data(fname,dtp=np.float32)
-            # reshape data on process 0
-            indata = self._initialize_indata(indata)
-            # get initial centroid on process 0
-            ctd = self.get_initial_ctd(indata, ini_ctd_dist_min)
+            # Use big data aware method
+            ctd = self.initialize_big_data_ctd(fname, ini_ctd_dist_min, dtp=dtp)
             # self.print(ctd.shape)
             # Allows for easy garbage collect of the big data chunk
-            indata = None
+            # indata = None
             # Another patchwork fix for nrec!
             self.comm.bcast(self.nrec,root=0)
         else:
             # Generate empty array
             self.nrec = None
             self.nrec = self.comm.bcast(self.nrec, root=0)
-            ctd = np.empty(shape=(self.knum,self.nelem), dtype=np.float64)
+            ctd = np.empty(shape=(self.knum,self.nelem), dtype=np.float32)
         # MPI  Barrier!
         self.comm.barrier()
         # Distribute the initial centroids!
-        self.comm.Bcast([ctd, MPI.DOUBLE],root=0)
+        self.comm.Bcast([ctd, MPI.FLOAT],root=0)
         self.Allprint(ctd.shape)
         # Read in only relevant records to memory
         self.startRec, self.stopRec = km_mod.get_record_spans(self.nrec, self.rank, self.tprocs)
         self.totalRec = self.stopRec - self.startRec
-        bites = np.dtype(dtp).itemsize
-        offset = self.startRec * self.nelem * bites
-        with open(fname, "rb") as inFile:
-            # Use the simple file pointer solution
-            # Find start of data
-            self.Allprint("offset: {} totalRec: {}".format(offset, self.totalRec))
-            inFile.seek(offset, 0)
-            # Read in data
-            indata = np.fromfile(inFile, dtype=dtp, count=self.totalRec*self.nelem)
-            self.Allprint("Chunk size: {}".format(indata.shape))
-        # Reshape
-        indata = self._initialize_indata(indata)
+        indata = self._initialize_big_indata(fname, dtp=dtp)
 
         # For laziness set these values
         self.startRec = 0
         self.stopRec = indata.shape[0]
-
         # Return all things!
         return indata,ctd
         
@@ -203,6 +274,9 @@ class K_means:
         """
         Repeat loop until getting converged centroid
         """
+        self.print(indata.dtype)
+        self.comm.barrier()
+        self.startTime = MPI.Wtime()
         self.print("Start: K={}, ID={}".format(self.knum,self.id_))
         n10=0; nk=2**n10
         # n10=3; nk=2**n10
@@ -226,7 +300,7 @@ class K_means:
                 
                 # Merge the partial sums
                 fodder = outsum[ic,:]/float(cl_count[ic])
-                tmpctd = np.empty(shape=fodder.shape,order='C')
+                tmpctd = np.empty(shape=fodder.shape,dtype=indata.dtype,order='C')
 
                 # MPI Reduce on tmpctd -> since cl==ncl doesn't matter, this works
                 self.comm.Allreduce(fodder, tmpctd, op=MPI.SUM)
@@ -267,7 +341,7 @@ class K_means:
             thisTime = endTime - startTime
             # Merge the partial sum into a smaller sum
             fodder = wcvsum.sum(axis=1)
-            wcv = np.empty(shape=fodder.shape)
+            wcv = np.empty(shape=fodder.shape,dtype=indata.dtype)
             self.comm.Allreduce(fodder, wcv, op=MPI.SUM)
             wcv=wcv/cl_count
             
@@ -275,7 +349,27 @@ class K_means:
             self.print("** Knum= {}, ID= {}, Total WCV= {}, LowestCF WCV={}, WCV Time= {}".format(
                 self.knum,self.id_,wcv.sum(),wcv[np.argsort(cf)[0]],datetime.timedelta(seconds=thisTime)))
 
+        self.comm.barrier()
+        self.endTime = MPI.Wtime()
+        # Output the time file for post-processing
+        if self.rank == 0:
+            self.diag_time()
+
         return ctd
+    def diag_time(self):
+        timesec = self.endTime - self.startTime
+        inthrs  = int(timesec // (60*60));
+        intmin  = int((timesec - inthrs*60*60) // 60);
+        intsec  = int(timesec % 60);
+        timemin = timesec / 60.0;
+        timehrs = timesec / (60.0*60.0);
+        fmt = ""
+        with open("diag_time.dat", "w") as fid:
+          fmt += "{:02d}:{:02d}:{:02d} {:7.2f} {:9.2f} {:10.2f}";
+          fmt += " %% HH:MM:SS=hours=minutes=seconds\n";
+          fmt  = fmt.format(inthrs,intmin,intsec, timehrs,timemin,timesec);
+          fid.write(fmt)
+
 
     def write_centroid(self,fnamehead,ctd,ftype='b'):
         """ 
@@ -335,7 +429,7 @@ class K_means:
         A lazy way to restrict MPI printing. Checks it's process rank and only prints
         if self.rank == 0."""
         if self.rank == 0:
-            print(*args)
+            print("[{:03d}] ".format(self.rank),*args)
             sys.stdout.flush()
 
     def Allprint(self,*args):
