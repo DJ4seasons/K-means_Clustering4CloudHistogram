@@ -1,4 +1,5 @@
 from numpy import zeros,empty,copy
+from numpy import float32
 cimport cython
 cimport openmp
 
@@ -12,8 +13,8 @@ import sys
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-cdef double calc_dist_simp(double [:] arr1, double  [:] arr2, long l) nogil:
-    cdef double d
+cdef float calc_dist_simp(float [:] arr1, float  [:] arr2, long l) nogil:
+    cdef float d
     cdef long i
     for i in range(l):
         d += (arr1[i] - arr2[i])*(arr1[i] - arr2[i])
@@ -23,9 +24,9 @@ cdef double calc_dist_simp(double [:] arr1, double  [:] arr2, long l) nogil:
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-cdef double calc_dist_noslice(double [:,::1] arr1, long ii, double [:,::1] arr2, long kk, long l) nogil:
-    cdef double d = 0.0
-    cdef double tmp
+cdef float calc_dist_noslice(float [:,::1] arr1, long ii, float [:,::1] arr2, long kk, long l) nogil:
+    cdef float d = 0.0
+    cdef float tmp
     cdef long i
     for i in range(l):
         tmp = arr1[ii,i]-arr2[kk,i]
@@ -38,21 +39,21 @@ cdef double calc_dist_noslice(double [:,::1] arr1, long ii, double [:,::1] arr2,
 @cython.wraparound(False)
 def calc_dist(arr1, arr2):
     # Get two memory views
-    cdef double [:] arr_1 = arr1
-    cdef double [:] arr_2 = arr2
+    cdef float [:] arr_1 = arr1
+    cdef float [:] arr_2 = arr2
     cdef long elem = len(arr1)
-    cdef double res = calc_dist_simp(arr_1, arr_2, elem)
+    cdef float res = calc_dist_simp(arr_1, arr_2, elem)
     return res
 
 # Used in assign and get newsum
 @cython.boundscheck(False)
 @cython.wraparound(False)
-# cdef void calculate_cl(double [:,::1] indata, double [:,::1] ctd, long [::1] cl, int ncl, int nrec, int nk, int nelem) nogil:
-cdef void calculate_cl(double [:,::1] indata, double [:,::1] ctd, long [::1] cl, int ncl, int startRec, int stopRec, int nk, int nelem) nogil:
+# cdef void calculate_cl(float [:,::1] indata, float [:,::1] ctd, long [::1] cl, int ncl, int nrec, int nk, int nelem) nogil:
+cdef void calculate_cl(float [:,::1] indata, float [:,::1] ctd, long [::1] cl, int ncl, int startRec, int stopRec, int nk, int nelem) nogil:
     cdef:
         int ii, kk
-        double mindd = 1.e5
-        double tmpdd = 1.e5
+        float mindd = 1.e5
+        float tmpdd = 1.e5
         int idx = ncl
     # OpenMP Enabled Here
     for ii in prange(startRec, stopRec, nk, schedule='static', nogil=True):
@@ -73,7 +74,7 @@ cdef void calculate_cl(double [:,::1] indata, double [:,::1] ctd, long [::1] cl,
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-cdef void calculate_outsum(double [:,::1] indata, long [::1] cl, double [:,::1] outsum, int startRec, int stopRec, int nk, int nelem) nogil:
+cdef void calculate_outsum(float [:,::1] indata, long [::1] cl, float [:,::1] outsum, int startRec, int stopRec, int nk, int nelem) nogil:
     cdef:
         int jj, ii, clj
     # cdef compatible way since the range method is sketchy in cython
@@ -85,7 +86,7 @@ cdef void calculate_outsum(double [:,::1] indata, long [::1] cl, double [:,::1] 
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def assign_and_get_newsum(double [:,::1] indata, double [:,::1] ctd, int startRec, int stopRec, int nk):
+def assign_and_get_newsum(float [:,::1] indata, float [:,::1] ctd, int startRec, int stopRec, int nk):
     cdef int nelem = indata.shape[1]
     cdef int nrec = indata.shape[0]
     cdef int ncl = ctd.shape[0]
@@ -93,9 +94,9 @@ def assign_and_get_newsum(double [:,::1] indata, double [:,::1] ctd, int startRe
     # Important for the return statement
     cl = empty(nrec,dtype=int)
     cl.fill(ncl)
-    outsum = zeros(shape=(ncl,nelem),order='C')
+    outsum = zeros(shape=(ncl,nelem),dtype=float32, order='C')
     cdef long [::1] cl_mview = cl
-    cdef double [:,::1] outsum_mview = outsum
+    cdef float [:,::1] outsum_mview = outsum
     # OpenMP is wrapped in this function
     calculate_cl(indata, ctd, cl_mview, ncl, startRec, stopRec, nk, nelem)
 
@@ -106,16 +107,16 @@ def assign_and_get_newsum(double [:,::1] indata, double [:,::1] ctd, int startRe
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def get_wcv_sum(double [:,::1] indata, double [:,::1] ctd, long [:] cl, int startRec, int stopRec):
+def get_wcv_sum(float [:,::1] indata, float [:,::1] ctd, long [:] cl, int startRec, int stopRec):
     cdef int nelem = indata.shape[1]
     cdef int nrec = indata.shape[0]
     cdef int ncl = ctd.shape[0]
     cdef int ii,mm
     cdef long cli
     # Need to return a numpy array
-    outsum = zeros(shape=(ncl,nelem),order='C')
-    cdef double [:,::1] outsum_mview = outsum
-    cdef double tmp
+    outsum = zeros(shape=(ncl,nelem),dtype=float32,order='C')
+    cdef float [:,::1] outsum_mview = outsum
+    cdef float tmp
     for ii in range(startRec,stopRec):
         for mm in range(nelem):
             cli = cl[ii]
